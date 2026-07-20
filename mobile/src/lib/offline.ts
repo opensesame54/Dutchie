@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { QueryClient, onlineManager, focusManager } from '@tanstack/react-query';
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -97,4 +98,15 @@ export async function clearPersistedCache(): Promise<void> {
   // balances for even a frame.
   await AsyncStorage.removeItem(CACHE_KEY);
   queryClient.clear();
+}
+
+/**
+ * Subscribe to connectivity for rendering. `onlineManager` is already the
+ * single source of truth for whether queries run, so reading from it here
+ * keeps the UI and the fetching layer from disagreeing about the state.
+ */
+export function useIsOnline(): boolean {
+  const [online, setOnline] = useState(onlineManager.isOnline());
+  useEffect(() => onlineManager.subscribe(() => setOnline(onlineManager.isOnline())), []);
+  return online;
 }

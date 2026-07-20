@@ -64,12 +64,16 @@ export function setUnauthenticatedHandler(fn: () => void) {
   onUnauthenticated = fn;
 }
 
+/** Refresh could not reach the server — distinct from the server refusing. */
+const OFFLINE = Symbol('offline');
+type RefreshResult = string | null | typeof OFFLINE;
+
 // A single in-flight refresh shared by every waiting request; without this, a
 // screen firing five queries at once would burn five refresh tokens and all but
 // one would fail against the rotation check.
-let refreshInFlight: Promise<string | null> | null = null;
+let refreshInFlight: Promise<RefreshResult> | null = null;
 
-async function refreshAccessToken(): Promise<string | null> {
+async function refreshAccessToken(): Promise<RefreshResult> {
   if (refreshInFlight) return refreshInFlight;
 
   refreshInFlight = (async () => {
@@ -84,6 +88,7 @@ async function refreshAccessToken(): Promise<string | null> {
       });
 
       if (!res.ok) {
+        // The server saw the token and refused it: the session is dead.
         await tokenStore.clear();
         onUnauthenticated?.();
         return null;
@@ -93,7 +98,10 @@ async function refreshAccessToken(): Promise<string | null> {
       await tokenStore.set(data.accessToken, data.refreshToken);
       return data.accessToken as string;
     } catch {
-      return null;
+      // Could not reach the server at all. The refresh token is probably still
+      // perfectly valid, so this must be reported as offline rather than
+      // collapsing into the same null that means "signed out".
+      return OFFLINE;
     } finally {
       refreshInFlight = null;
     }
@@ -137,6 +145,13 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   // Access tokens are short-lived; one transparent retry after refreshing.
   if (res.status === 401 && !opts.anonymous) {
     const fresh = await refreshAccessToken();
+
+    if (fresh === OFFLINE) {
+      // Lost the connection mid-refresh. Report it as a network failure so
+      // callers can fall back to cache, rather than as a dead session.
+      throw new ApiError(0, 'No connection. Check your network and try again.');
+    }
+
     if (fresh) {
       res = await send(fresh);
     } else {

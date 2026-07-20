@@ -8,6 +8,7 @@ import {
 import { spacing } from '../theme';
 import { formatMoney } from '../lib/money';
 import { useSummary, useActivity } from '../lib/queries';
+import { useIsOnline } from '../lib/offline';
 import { useAuth } from '../store/auth';
 import type { ActivityEntry } from '../types';
 
@@ -15,6 +16,7 @@ export function DashboardScreen() {
   const c = useTheme();
   const insets = useSafeAreaInsets();
   const user = useAuth((s) => s.user);
+  const online = useIsOnline();
   const summary = useSummary();
   const activity = useActivity();
 
@@ -47,6 +49,17 @@ export function DashboardScreen() {
       }
     >
       <T variant="screenTitle">Hey {user?.name.split(' ')[0]}</T>
+
+      {/* Say the numbers are stale rather than letting them look wrong. An
+          unexplained old balance reads as a bug; a labelled one reads as a
+          network problem, which is what it is. */}
+      {!online ? (
+        <View style={[styles.offlineBanner, { borderColor: c.rule, backgroundColor: c.ochreSoft }]}>
+          <T variant="caption" color={c.inkSoft}>
+            Offline — showing your last known balances
+          </T>
+        </View>
+      ) : null}
 
       <Card style={{ marginTop: spacing.lg }}>
         {summary.isLoading ? (
@@ -188,6 +201,13 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
 }
 
 const styles = StyleSheet.create({
+  offlineBanner: {
+    marginTop: spacing.md,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
   splitRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
