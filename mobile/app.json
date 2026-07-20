@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "Dutchie",
+    "slug": "dutchie",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "dutchie",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.dutchie.app"
+    },
+    "android": {
+      "package": "dev.dutchie.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#F4EFE3",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-dev-client",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 160,
+          "resizeMode": "contain",
+          "backgroundColor": "#F4EFE3",
+          "dark": {
+            "backgroundColor": "#14110C"
+          }
+        }
+      ]
+    ]
+  }
+}
