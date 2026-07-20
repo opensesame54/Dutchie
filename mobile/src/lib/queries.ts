@@ -111,8 +111,13 @@ export function useCreateExpense() {
       const previous = qc.getQueriesData<Expense[]>({ queryKey: ['expenses'] });
       const optimistic = buildOptimisticExpense(input);
 
+      // `['expenses']` matches by PREFIX, so this also hits the single-expense
+      // detail cache at `['expenses', 'detail', id]`, whose data is one Expense
+      // object rather than a list. Every updater below must therefore check the
+      // shape before treating it as an array — the generic above is only an
+      // assertion and does not make it true.
       qc.setQueriesData<Expense[]>({ queryKey: ['expenses'] }, (old) =>
-        old ? [optimistic, ...old] : [optimistic],
+        Array.isArray(old) ? [optimistic, ...old] : old,
       );
 
       return { previous, optimisticId: optimistic.id };
@@ -128,7 +133,9 @@ export function useCreateExpense() {
       // Swap the placeholder for the server's version, which carries the real
       // id and the authoritative split amounts.
       qc.setQueriesData<Expense[]>({ queryKey: ['expenses'] }, (old) =>
-        old?.map((e) => (e.id === context?.optimisticId ? data.expense : e)),
+        Array.isArray(old)
+          ? old.map((e) => (e.id === context?.optimisticId ? data.expense : e))
+          : old,
       );
 
       qc.invalidateQueries({ queryKey: keys.summary });
@@ -194,11 +201,13 @@ export function useUpdateExpense() {
       const previous = qc.getQueriesData<Expense[]>({ queryKey: ['expenses'] });
 
       qc.setQueriesData<Expense[]>({ queryKey: ['expenses'] }, (old) =>
-        old?.map((e) =>
-          e.id === input.id
-            ? { ...e, description: input.description, category: input.category }
-            : e,
-        ),
+        Array.isArray(old)
+          ? old.map((e) =>
+              e.id === input.id
+                ? { ...e, description: input.description, category: input.category }
+                : e,
+            )
+          : old,
       );
 
       return { previous };
@@ -229,7 +238,7 @@ export function useDeleteExpense() {
       const previous = qc.getQueriesData<Expense[]>({ queryKey: ['expenses'] });
 
       qc.setQueriesData<Expense[]>({ queryKey: ['expenses'] }, (old) =>
-        old?.filter((e) => e.id !== id),
+        Array.isArray(old) ? old.filter((e) => e.id !== id) : old,
       );
 
       return { previous };

@@ -54,9 +54,11 @@ export function LoginScreen() {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1, backgroundColor: c.paper }}
-      // Android resizes the window itself; adding padding on top of that
-      // double-counts the keyboard and pushes the form off-screen.
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      // "padding" on both platforms. Android used to resize the window itself
+      // under adjustResize, but from Android 15 (SDK 35) edge-to-edge apps keep
+      // a full-height window and the IME draws over it, so relying on the old
+      // behaviour hid the submit button behind the keyboard.
+      behavior="padding"
     >
       <ScrollView
         contentContainerStyle={[

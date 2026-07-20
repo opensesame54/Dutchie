@@ -40,6 +40,14 @@ export function AddExpenseScreen({ route, navigation }: Props) {
   const [category, setCategory] = useState('general');
   const [splitType, setSplitType] = useState<SplitType>('EQUAL');
   const [paidById, setPaidById] = useState<string | undefined>(me?.id);
+  /**
+   * Several people can chip in for one bill, which the schema and API have
+   * always supported. Single-payer stays the default because it is the common
+   * case; this flips to a per-person amount table when it is not.
+   */
+  const [multiPayer, setMultiPayer] = useState(false);
+  /** userId -> amount string, only meaningful while `multiPayer` is on. */
+  const [payerAmounts, setPayerAmounts] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   /** Raw per-person input for EXACT / PERCENTAGE / SHARES. */
   const [values, setValues] = useState<Record<string, string>>({});
@@ -68,6 +76,17 @@ export function AddExpenseScreen({ route, navigation }: Props) {
     setCategory(expense.category);
     setSplitType(expense.splitType);
     setPaidById(expense.payers[0]?.userId);
+
+    // Load every payer, not just the first. Dropping the rest here is what
+    // silently rewrote a two-payer bill as one person paying the lot.
+    if (expense.payers.length > 1) {
+      setMultiPayer(true);
+      setPayerAmounts(
+        Object.fromEntries(
+          expense.payers.map((p) => [p.userId, formatMinor(p.amountMinor, expense.currency)]),
+        ),
+      );
+    }
     setSelected(Object.fromEntries(expense.splits.map((sp) => [sp.userId, true])));
     setValues(
       Object.fromEntries(
@@ -134,13 +153,35 @@ export function AddExpenseScreen({ route, navigation }: Props) {
   const exactMismatch =
     splitType === 'EXACT' && totalMinor !== null && previewSum !== totalMinor;
 
+  /** Payers as minor units, whichever entry mode is active. */
+  const payerEntries = useMemo(() => {
+    if (!multiPayer) {
+      return paidById && totalMinor !== null
+        ? [{ userId: paidById, amountMinor: totalMinor }]
+        : [];
+    }
+    return Object.entries(payerAmounts)
+      .map(([userId, raw]) => ({ userId, amountMinor: parseToMinor(raw, currency) ?? 0 }))
+      .filter((p) => p.amountMinor > 0);
+  }, [multiPayer, paidById, totalMinor, payerAmounts, currency]);
+
+  const paidSum = payerEntries.reduce((a, p) => a + p.amountMinor, 0);
+  // The server enforces this too, but catching it here means the user sees
+  // which way it is out before a round-trip.
+  const payerMismatch = multiPayer && totalMinor !== null && paidSum !== totalMinor;
+
   async function submit() {
     setError(null);
 
     if (!description.trim()) return setError('What was this for?');
     if (totalMinor === null || totalMinor <= 0) return setError('Enter a valid amount');
-    if (!paidById) return setError('Who paid?');
+    if (payerEntries.length === 0) return setError('Who paid?');
     if (participants.length === 0) return setError('Split between at least one person');
+    if (payerMismatch) {
+      return setError(
+        `Payments add up to ${formatMoney(paidSum, currency)}, not ${formatMoney(totalMinor, currency)}`,
+      );
+    }
     if (exactMismatch) {
       return setError(
         `Exact amounts add up to ${formatMoney(previewSum, currency)}, not ${formatMoney(totalMinor, currency)}`,
@@ -154,7 +195,10 @@ export function AddExpenseScreen({ route, navigation }: Props) {
         currency,
         category,
         splitType,
-        payers: [{ userId: paidById, amount: formatMinor(totalMinor, currency) }],
+        payers: payerEntries.map((p) => ({
+          userId: p.userId,
+          amount: formatMinor(p.amountMinor, currency),
+        })),
         participants: participants.map((p) => ({
           userId: p.id,
           value:
@@ -198,7 +242,9 @@ export function AddExpenseScreen({ route, navigation }: Props) {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1, backgroundColor: c.paper }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      // See LoginScreen: from Android 15 an edge-to-edge window is not resized
+      // for the IME, so "padding" is needed on Android too.
+      behavior="padding"
     >
       <ScrollView
         contentContainerStyle={{ padding: spacing.lg, paddingBottom: insets.bottom + spacing.xxl }}
@@ -241,18 +287,75 @@ export function AddExpenseScreen({ route, navigation }: Props) {
         <View style={{ height: spacing.xl }} />
 
         <SectionHeading>Who paid</SectionHeading>
-        <View style={styles.chips}>
-          {members.map((m) => (
-            <Chip
-              key={m.id}
-              label={m.id === me?.id ? 'You' : m.name.split(' ')[0]}
-              active={paidById === m.id}
-              onPress={() => setPaidById(m.id)}
-            />
-          ))}
-        </View>
 
-        <View style={{ height: spacing.xl }} />
+        {multiPayer ? (
+          <Card>
+            {members.map((m) => (
+              <View key={m.id}>
+                <View style={styles.memberRow}>
+                  <T variant="body" style={{ flex: 1 }}>
+                    {m.id === me?.id ? 'You' : m.name}
+                  </T>
+                  <View style={[styles.valueInput, { borderColor: c.rule, backgroundColor: c.paper }]}>
+                    <T variant="caption" color={c.inkFaint}>{currency}</T>
+                    <View style={{ width: spacing.xs }} />
+                    <TextInput
+                      value={payerAmounts[m.id] ?? ''}
+                      onChangeText={(v) => setPayerAmounts((s) => ({ ...s, [m.id]: v }))}
+                      keyboardType="decimal-pad"
+                      placeholder="0.00"
+                      placeholderTextColor={c.inkFaint}
+                      accessibilityLabel={`Amount paid by ${m.name}`}
+                      style={{ minWidth: 64, color: c.ink, fontSize: 15, padding: 0 }}
+                    />
+                  </View>
+                </View>
+                <Divider />
+              </View>
+            ))}
+
+            <View style={styles.totalRow}>
+              <T variant="bodyStrong">Total paid</T>
+              <T variant="amount" color={payerMismatch ? c.negative : c.ink}>
+                {formatMoney(paidSum, currency)}
+              </T>
+            </View>
+          </Card>
+        ) : (
+          <View style={styles.chips}>
+            {members.map((m) => (
+              <Chip
+                key={m.id}
+                label={m.id === me?.id ? 'You' : m.name.split(' ')[0]}
+                active={paidById === m.id}
+                onPress={() => setPaidById(m.id)}
+              />
+            ))}
+          </View>
+        )}
+
+        <Pressable
+          onPress={() => {
+            const next = !multiPayer;
+            setMultiPayer(next);
+            // Carry the single payer's amount across so switching modes never
+            // silently empties the table the user was about to rely on.
+            if (next && paidById && totalMinor !== null) {
+              setPayerAmounts((s) => ({
+                ...s,
+                [paidById]: s[paidById] ?? formatMinor(totalMinor, currency),
+              }));
+            }
+          }}
+          accessibilityRole="button"
+          style={styles.linkRow}
+        >
+          <T variant="caption" color={c.ochre}>
+            {multiPayer ? 'Only one person paid' : 'Multiple people paid'}
+          </T>
+        </Pressable>
+
+        <View style={{ height: spacing.lg }} />
 
         <SectionHeading>Split</SectionHeading>
         <View style={styles.chips}>
@@ -434,6 +537,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    paddingTop: spacing.sm,
+  },
+  linkRow: {
+    minHeight: MIN_TOUCH_TARGET,
+    justifyContent: 'center',
     paddingTop: spacing.sm,
   },
 });
