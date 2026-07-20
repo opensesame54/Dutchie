@@ -24,7 +24,15 @@ model User {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  // Notification preferences. Push still requires a registered device token;
+  // these only gate whether a notification is sent at all.
+  notifyOnExpense   Boolean @default(true)
+  notifyOnSettlement Boolean @default(true)
+  weeklyDigest      Boolean @default(false)
+
   memberships       GroupMember[]
+  deviceTokens      DeviceToken[]
+  notifications     Notification[]
   createdGroups     Group[]          @relation("GroupCreator")
   expensesCreated   Expense[]        @relation("ExpenseCreator")
   expensePayments   ExpensePayer[]
@@ -39,6 +47,59 @@ model User {
   passwordResets    PasswordReset[]
 
   @@index([email])
+}
+
+/// An Expo push token for one installation. A user can have several (phone,
+/// tablet, reinstall). Tokens are unique so re-registering the same device
+/// updates rather than duplicating.
+model DeviceToken {
+  id         String   @id @default(uuid())
+  userId     String
+  token      String   @unique
+  platform   String   @default("android")
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// In-app notification feed (the bell). Push delivery is best-effort and can
+/// fail silently; this table is the durable record the UI reads.
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  /// Where tapping the notification should navigate (e.g. expense id).
+  targetId  String?
+  groupId   String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+}
+
+/// Daily FX rates, cached so balance conversion never calls an external API
+/// per request. `rateScaled` is quote-per-1-base scaled by RATE_SCALE (1e10)
+/// and stored as BigInt — a float rate would reintroduce exactly the rounding
+/// error the rest of the money path is built to avoid.
+model ExchangeRate {
+  id            String   @id @default(uuid())
+  baseCurrency  String
+  quoteCurrency String
+  rateScaled    BigInt
+  /// UTC date the rate applies to (midnight-normalised).
+  date          DateTime
+  fetchedAt     DateTime @default(now())
+
+  @@unique([baseCurrency, quoteCurrency, date])
+  @@index([date])
 }
 
 // Refresh tokens are persisted (hashed) so logout and password reset can
@@ -157,8 +218,18 @@ model Expense {
   receiptUrl     String?
   splitType      SplitType @default(EQUAL)
   createdById    String
+  // A recurring expense is a TEMPLATE: it is never itself counted in balances
+  // (see `isTemplate`), it only spawns dated instances. Keeping the two apart
+  // means editing the schedule cannot retroactively rewrite past months.
   isRecurring    Boolean   @default(false)
   recurrenceRule String?
+  isTemplate     Boolean   @default(false)
+  /// When the generator should next materialise an instance. Null once the
+  /// series has ended (UNTIL/COUNT exhausted) or for non-templates.
+  nextOccurrenceAt DateTime?
+  /// Set on generated instances, pointing back at the template.
+  recurringTemplateId String?
+
   deletedAt      DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
@@ -169,8 +240,14 @@ model Expense {
   splits    ExpenseSplit[]
   comments  Comment[]
 
+  recurringTemplate Expense?  @relation("RecurringInstances", fields: [recurringTemplateId], references: [id], onDelete: SetNull)
+  recurringInstances Expense[] @relation("RecurringInstances")
+
   @@index([groupId, date])
   @@index([createdById])
+  // The generator scans for due templates; this keeps that a cheap index hit.
+  @@index([isTemplate, nextOccurrenceAt])
+  @@unique([recurringTemplateId, date])
 }
 
 // The brief modelled `paid_by` as a single column but also asked for multiple

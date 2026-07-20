@@ -24,7 +24,9 @@ export interface GroupBalances {
 async function loadGroupLedgers(groupId: string): Promise<Map<string, Ledger>> {
   const [expenses, settlements] = await Promise.all([
     prisma.expense.findMany({
-      where: { groupId, deletedAt: null },
+      // Recurring templates are schedules, not spend — they must never
+      // reach the ledger or every rent would be double-counted.
+      where: { groupId, deletedAt: null, isTemplate: false },
       include: { payers: true, splits: true },
     }),
     prisma.settlement.findMany({ where: { groupId, deletedAt: null } }),
@@ -92,6 +94,7 @@ export async function computeUserBalances(userId: string): Promise<{
     prisma.expense.findMany({
       where: {
         deletedAt: null,
+        isTemplate: false,
         OR: [
           { splits: { some: { userId } } },
           { payers: { some: { userId } } },

@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/db';
 import { computeSplits, type SplitType } from '../src/core/splits';
+import { firstOccurrenceAfter } from '../src/services/recurringService';
 import { toMinorUnits } from '../src/money/currency';
 
 /**
@@ -25,6 +26,9 @@ async function main() {
   console.log('Resetting demo data...');
 
   // Order matters: children before parents, since some relations restrict.
+  await prisma.notification.deleteMany();
+  await prisma.deviceToken.deleteMany();
+  await prisma.exchangeRate.deleteMany();
   await prisma.activityLog.deleteMany();
   await prisma.comment.deleteMany();
   await prisma.expenseSplit.deleteMany();
@@ -132,6 +136,14 @@ async function main() {
         createdById: opts.createdById,
         isRecurring: opts.isRecurring ?? false,
         recurrenceRule: opts.recurrenceRule ?? null,
+        // A recurring seed row is a TEMPLATE: excluded from balances, it only
+        // spawns instances. The instance carrying the money is created below,
+        // so the resulting balances are identical to a one-off expense.
+        isTemplate: opts.isRecurring ?? false,
+        nextOccurrenceAt:
+          opts.isRecurring && opts.recurrenceRule
+            ? firstOccurrenceAfter(opts.recurrenceRule, opts.date)
+            : null,
         payers: {
           create: opts.paidBy.map((p) => ({
             userId: p.userId,
@@ -147,6 +159,37 @@ async function main() {
         },
       },
     });
+
+    // Materialise the first occurrence so the template has real spend behind it.
+    if (opts.isRecurring) {
+      await prisma.expense.create({
+        data: {
+          groupId: opts.groupId,
+          description: opts.description,
+          amountMinor: totalMinor,
+          currency: opts.currency,
+          category: opts.category,
+          date: opts.date,
+          notes: opts.notes ?? null,
+          splitType: opts.splitType,
+          createdById: opts.createdById,
+          recurringTemplateId: expense.id,
+          payers: {
+            create: opts.paidBy.map((p) => ({
+              userId: p.userId,
+              amountMinor: toMinorUnits(p.amount, opts.currency),
+            })),
+          },
+          splits: {
+            create: splits.map((s) => ({
+              userId: s.userId,
+              owedAmountMinor: s.owedAmountMinor,
+              shareValue: s.shareValue,
+            })),
+          },
+        },
+      });
+    }
 
     await prisma.activityLog.create({
       data: {

@@ -7,6 +7,8 @@ import { expensesRouter } from './routes/expenses';
 import { settlementsRouter, balancesRouter } from './routes/settlements';
 import { friendsRouter } from './routes/friends';
 import { activityRouter } from './routes/activity';
+import { notificationsRouter } from './routes/notifications';
+import { exportsRouter } from './routes/exports';
 import { errorHandler, notFoundHandler } from './errors';
 
 export function createApp() {
@@ -28,6 +30,8 @@ export function createApp() {
   app.use('/api/balances', balancesRouter);
   app.use('/api/friends', friendsRouter);
   app.use('/api/activity', activityRouter);
+  app.use('/api/notifications', notificationsRouter);
+  app.use('/api/exports', exportsRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

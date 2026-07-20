@@ -6,6 +6,7 @@ import { requireAuth, currentUserId } from '../auth/middleware';
 import { requireGroupMember, requireGroupAdmin } from '../access';
 import { isSupportedCurrency } from '../money/currency';
 import { computeGroupBalances } from '../services/balanceService';
+import { notifyAddedToGroup } from '../services/notificationService';
 
 export const groupsRouter = Router();
 groupsRouter.use(requireAuth);
@@ -172,6 +173,8 @@ groupsRouter.post(
         metadata: { name: invitee.name, addedBy: userId },
       },
     });
+
+    await notifyAddedToGroup(req.params.id, [invitee.id]).catch(() => undefined);
 
     res.status(201).json({ member: { id: invitee.id, name: invitee.name, email: invitee.email } });
   }),

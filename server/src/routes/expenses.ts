@@ -6,6 +6,8 @@ import { requireAuth, currentUserId } from '../auth/middleware';
 import { requireGroupMember, requireExpenseAccess, assertAllAreGroupMembers } from '../access';
 import { computeSplits, validatePayers, type SplitType } from '../core/splits';
 import { isSupportedCurrency, toMinorUnits } from '../money/currency';
+import { materialiseTemplate } from '../services/recurringService';
+import { notifyExpenseCreated } from '../services/notificationService';
 
 export const expensesRouter = Router();
 expensesRouter.use(requireAuth);
@@ -121,6 +123,10 @@ expensesRouter.post(
         createdById: userId,
         isRecurring: body.isRecurring,
         recurrenceRule: body.recurrenceRule ?? null,
+        // A recurring expense is stored as a template that spawns instances;
+        // the template itself is excluded from balances.
+        isTemplate: body.isRecurring,
+        nextOccurrenceAt: null,
         payers: { create: payers },
         splits: {
           create: splits.map((s) => ({
@@ -132,6 +138,14 @@ expensesRouter.post(
       },
       include: { payers: true, splits: true },
     });
+
+    // A template produces its first instance immediately, so the user sees the
+    // expense they just entered rather than waiting for the nightly job.
+    if (body.isRecurring) {
+      const materialised = await materialiseTemplate(expense.id);
+      res.status(201).json({ template: expense, expense: materialised });
+      return;
+    }
 
     await prisma.activityLog.create({
       data: {
@@ -147,7 +161,34 @@ expensesRouter.post(
       },
     });
 
+    // Best-effort: a failed push must not fail the expense.
+    await notifyExpenseCreated(expense.id).catch(() => undefined);
+
     res.status(201).json({ expense });
+  }),
+);
+
+/** Recurring templates for a group (the schedules, not the generated expenses). */
+expensesRouter.get(
+  '/recurring/templates',
+  asyncHandler(async (req, res) => {
+    const userId = currentUserId(req);
+    const groupId = z.string().uuid().optional().parse(req.query.groupId);
+    if (groupId) await requireGroupMember(groupId, userId);
+
+    const templates = await prisma.expense.findMany({
+      where: {
+        isTemplate: true,
+        deletedAt: null,
+        ...(groupId
+          ? { groupId }
+          : { group: { members: { some: { userId, leftAt: null } } } }),
+      },
+      include: { payers: true, splits: true, _count: { select: { recurringInstances: true } } },
+      orderBy: { nextOccurrenceAt: 'asc' },
+    });
+
+    res.json({ templates });
   }),
 );
 
@@ -173,7 +214,8 @@ expensesRouter.get(
       await requireGroupMember(q.groupId, userId);
     }
 
-    const where: Record<string, unknown> = { deletedAt: null };
+    // Templates are schedules; they are listed separately, not in the feed.
+    const where: Record<string, unknown> = { deletedAt: null, isTemplate: false };
 
     if (q.groupId) {
       where.groupId = q.groupId;

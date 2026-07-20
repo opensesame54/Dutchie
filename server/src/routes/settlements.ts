@@ -6,6 +6,9 @@ import { requireAuth, currentUserId } from '../auth/middleware';
 import { requireGroupMember, assertAllAreGroupMembers } from '../access';
 import { isSupportedCurrency, toMinorUnits } from '../money/currency';
 import { computeGroupBalances, computeUserBalances } from '../services/balanceService';
+import { notifySettlement } from '../services/notificationService';
+import { buildRateLookup } from '../services/exchangeRateService';
+import { convertTotals } from '../money/conversion';
 
 export const settlementsRouter = Router();
 settlementsRouter.use(requireAuth);
@@ -83,6 +86,8 @@ settlementsRouter.post(
         },
       },
     });
+
+    await notifySettlement(settlement.id).catch(() => undefined);
 
     res.status(201).json({ settlement });
   }),
@@ -178,15 +183,54 @@ balancesRouter.get(
     const { perFriend, totalsByCurrency } = await computeUserBalances(userId);
 
     const friendIds = Object.keys(perFriend);
-    const friends = friendIds.length
-      ? await prisma.user.findMany({
-          where: { id: { in: friendIds } },
-          select: { id: true, name: true, avatarUrl: true, email: true },
-        })
-      : [];
+    const [friends, me] = await Promise.all([
+      friendIds.length
+        ? prisma.user.findMany({
+            where: { id: { in: friendIds } },
+            select: { id: true, name: true, avatarUrl: true, email: true },
+          })
+        : Promise.resolve([]),
+      prisma.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { defaultCurrency: true },
+      }),
+    ]);
+
+    // Optional display currency, defaulting to the user's own. Balances stay
+    // authoritative per-currency; this is a convenience total on top.
+    const displayCurrency = (
+      z.string().length(3).optional().parse(req.query.displayCurrency) ?? me.defaultCurrency
+    ).toUpperCase();
+
+    const lookup = await buildRateLookup();
+
+    const converted = convertTotals(
+      Object.fromEntries(Object.entries(totalsByCurrency).map(([c, t]) => [c, t.net])),
+      displayCurrency,
+      lookup,
+    );
+    const convertedOwed = convertTotals(
+      Object.fromEntries(Object.entries(totalsByCurrency).map(([c, t]) => [c, t.owed])),
+      displayCurrency,
+      lookup,
+    );
+    const convertedOwing = convertTotals(
+      Object.fromEntries(Object.entries(totalsByCurrency).map(([c, t]) => [c, t.owing])),
+      displayCurrency,
+      lookup,
+    );
 
     res.json({
       totalsByCurrency,
+      // `unconvertible` names any currency with no rate, so the app can say
+      // "plus JPY balances" rather than quietly under-reporting the total.
+      converted: {
+        currency: displayCurrency,
+        net: converted.totalMinor,
+        owed: convertedOwed.totalMinor,
+        owing: convertedOwing.totalMinor,
+        unconvertible: converted.missing,
+      },
       friends: friends.map((f) => ({ ...f, balances: perFriend[f.id] })),
     });
   }),
