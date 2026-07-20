@@ -1,0 +1,282 @@
+// Dutchie — data model
+//
+// Money is stored as integer minor units (cents) in `*Minor` fields, never as
+// float. Currencies differ in how many minor units they use (USD 2, JPY 0), so
+// the exponent lives in currency metadata (src/money/currency.ts), not here.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Prisma 7 moved the connection URL out of the schema; it lives in
+// prisma.config.ts and is passed to PrismaClient via a driver adapter.
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id              String   @id @default(uuid())
+  name            String
+  email           String   @unique
+  passwordHash    String
+  avatarUrl       String?
+  defaultCurrency String   @default("USD")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  memberships       GroupMember[]
+  createdGroups     Group[]          @relation("GroupCreator")
+  expensesCreated   Expense[]        @relation("ExpenseCreator")
+  expensePayments   ExpensePayer[]
+  expenseSplits     ExpenseSplit[]
+  settlementsFrom   Settlement[]     @relation("SettlementFrom")
+  settlementsTo     Settlement[]     @relation("SettlementTo")
+  comments          Comment[]
+  activity          ActivityLog[]
+  friendshipsSent     Friendship[]   @relation("FriendshipRequester")
+  friendshipsReceived Friendship[]   @relation("FriendshipAddressee")
+  refreshTokens     RefreshToken[]
+  passwordResets    PasswordReset[]
+
+  @@index([email])
+}
+
+// Refresh tokens are persisted (hashed) so logout and password reset can
+// actually revoke a session — a stateless JWT alone cannot be revoked.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PasswordReset {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum GroupType {
+  TRIP
+  HOME
+  COUPLE
+  OTHER
+}
+
+model Group {
+  id              String    @id @default(uuid())
+  name            String
+  type            GroupType @default(OTHER)
+  avatarUrl       String?
+  defaultCurrency String    @default("USD")
+  createdById     String
+  inviteCode      String    @unique @default(uuid())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  createdBy   User          @relation("GroupCreator", fields: [createdById], references: [id])
+  members     GroupMember[]
+  expenses    Expense[]
+  settlements Settlement[]
+  activity    ActivityLog[]
+}
+
+enum GroupRole {
+  ADMIN
+  MEMBER
+}
+
+model GroupMember {
+  id       String    @id @default(uuid())
+  groupId  String
+  userId   String
+  role     GroupRole @default(MEMBER)
+  joinedAt DateTime  @default(now())
+  // Members who leave are soft-removed: their historical splits must stay
+  // intact or every past balance silently changes.
+  leftAt   DateTime?
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, userId])
+  @@index([userId])
+}
+
+enum FriendshipStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+model Friendship {
+  id          String           @id @default(uuid())
+  requesterId String
+  addresseeId String
+  status      FriendshipStatus @default(PENDING)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  requester User @relation("FriendshipRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  addressee User @relation("FriendshipAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
+
+  @@unique([requesterId, addresseeId])
+  @@index([addresseeId])
+}
+
+enum SplitType {
+  EQUAL
+  EXACT
+  PERCENTAGE
+  SHARES
+}
+
+model Expense {
+  id             String    @id @default(uuid())
+  // Null for direct 1:1 expenses between friends with no group.
+  groupId        String?
+  description    String
+  amountMinor    Int
+  currency       String
+  category       String    @default("general")
+  date           DateTime
+  notes          String?
+  receiptUrl     String?
+  splitType      SplitType @default(EQUAL)
+  createdById    String
+  isRecurring    Boolean   @default(false)
+  recurrenceRule String?
+  deletedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  group     Group?         @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  createdBy User           @relation("ExpenseCreator", fields: [createdById], references: [id])
+  payers    ExpensePayer[]
+  splits    ExpenseSplit[]
+  comments  Comment[]
+
+  @@index([groupId, date])
+  @@index([createdById])
+}
+
+// The brief modelled `paid_by` as a single column but also asked for multiple
+// payers; those conflict, so payment is its own table. The single-payer case is
+// just one row.
+model ExpensePayer {
+  id          String @id @default(uuid())
+  expenseId   String
+  userId      String
+  amountMinor Int
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, userId])
+  @@index([userId])
+}
+
+model ExpenseSplit {
+  id             String @id @default(uuid())
+  expenseId      String
+  userId         String
+  // Settled owed amount in minor units. Always sums to the expense total.
+  owedAmountMinor Int
+  // The raw operand the user typed for this split type (exact minor amount,
+  // percentage basis points, or share count). Kept so an expense can be
+  // reopened for editing showing what was entered, not the derived result.
+  shareValue     Int?
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, userId])
+  @@index([userId])
+}
+
+enum SettlementMethod {
+  CASH
+  VENMO
+  BANK
+  OTHER
+}
+
+model Settlement {
+  id          String           @id @default(uuid())
+  groupId     String?
+  fromUserId  String
+  toUserId    String
+  amountMinor Int
+  currency    String
+  date        DateTime
+  note        String?
+  method      SettlementMethod @default(CASH)
+  deletedAt   DateTime?
+  createdAt   DateTime         @default(now())
+
+  group    Group? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  fromUser User   @relation("SettlementFrom", fields: [fromUserId], references: [id])
+  toUser   User   @relation("SettlementTo", fields: [toUserId], references: [id])
+
+  @@index([groupId, date])
+  @@index([fromUserId])
+  @@index([toUserId])
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  expenseId String
+  userId    String
+  text      String
+  createdAt DateTime @default(now())
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expenseId, createdAt])
+}
+
+enum ActivityAction {
+  EXPENSE_CREATED
+  EXPENSE_UPDATED
+  EXPENSE_DELETED
+  SETTLEMENT_CREATED
+  SETTLEMENT_DELETED
+  MEMBER_JOINED
+  MEMBER_LEFT
+  MEMBER_REMOVED
+  GROUP_CREATED
+  GROUP_UPDATED
+  COMMENT_ADDED
+}
+
+model ActivityLog {
+  id         String         @id @default(uuid())
+  groupId    String?
+  userId     String
+  actionType ActivityAction
+  targetId   String?
+  // Denormalised snapshot (e.g. expense description, amount) so the feed still
+  // renders correctly after the target row is edited or deleted.
+  metadata   Json?
+  createdAt  DateTime       @default(now())
+
+  group Group? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, createdAt])
+  @@index([userId, createdAt])
+}
