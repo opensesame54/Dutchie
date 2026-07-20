@@ -42,6 +42,8 @@ const expenseBodySchema = z
       .array(z.object({ userId: z.string().uuid(), value: z.number().int().optional() }))
       .min(1)
       .max(50),
+    /// Idempotency key from an offline client replaying a queued expense.
+    clientRequestId: z.string().trim().min(1).max(100).optional(),
     isRecurring: z.boolean().default(false),
     recurrenceRule: z.string().max(200).nullable().optional(),
   })
@@ -107,6 +109,19 @@ expensesRouter.post(
       }
     }
 
+    // Idempotency: a retried offline submission returns the original expense
+    // instead of creating a second one.
+    if (body.clientRequestId) {
+      const existing = await prisma.expense.findUnique({
+        where: { clientRequestId: body.clientRequestId },
+        include: { payers: true, splits: true },
+      });
+      if (existing) {
+        res.status(200).json({ expense: existing, deduplicated: true });
+        return;
+      }
+    }
+
     const { totalMinor, payers, splits } = buildExpenseParts(body);
 
     const expense = await prisma.expense.create({
@@ -127,6 +142,7 @@ expensesRouter.post(
         // the template itself is excluded from balances.
         isTemplate: body.isRecurring,
         nextOccurrenceAt: null,
+        clientRequestId: body.clientRequestId ?? null,
         payers: { create: payers },
         splits: {
           create: splits.map((s) => ({

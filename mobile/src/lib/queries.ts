@@ -68,6 +68,14 @@ export function useExpenses(params: { groupId?: string; friendId?: string; searc
   });
 }
 
+export function useExpense(id: string | undefined) {
+  return useQuery({
+    queryKey: ['expenses', 'detail', id],
+    enabled: !!id,
+    queryFn: () => request<{ expense: Expense }>(`/expenses/${id}`).then((r) => r.expense),
+  });
+}
+
 export function useActivity(groupId?: string) {
   return useQuery({
     queryKey: keys.activity(groupId),
@@ -94,15 +102,117 @@ export function useCreateExpense() {
   return useMutation({
     mutationFn: (input: CreateExpenseInput) =>
       request<{ expense: Expense }>('/expenses', { method: 'POST', body: input }),
-    onSuccess: (_data, input) => {
-      // Anything that shows a number derived from this expense must refetch.
-      qc.invalidateQueries({ queryKey: ['expenses'] });
+
+    // Optimistic insert: the expense appears in the list immediately, and the
+    // snapshot taken here is what we roll back to if the request fails.
+    onMutate: async (input) => {
+      await qc.cancelQueries({ queryKey: ['expenses'] });
+
+      const previous = qc.getQueriesData<Expense[]>({ queryKey: ['expenses'] });
+      const optimistic = buildOptimisticExpense(input);
+
+      qc.setQueriesData<Expense[]>({ queryKey: ['expenses'] }, (old) =>
+        old ? [optimistic, ...old] : [optimistic],
+      );
+
+      return { previous, optimisticId: optimistic.id };
+    },
+
+    onError: (_err, _input, context) => {
+      // Put every touched cache back exactly as it was. Leaving a phantom
+      // expense on screen after a failure is worse than never showing it.
+      context?.previous?.forEach(([key, data]) => qc.setQueryData(key, data));
+    },
+
+    onSuccess: (data, input, context) => {
+      // Swap the placeholder for the server's version, which carries the real
+      // id and the authoritative split amounts.
+      qc.setQueriesData<Expense[]>({ queryKey: ['expenses'] }, (old) =>
+        old?.map((e) => (e.id === context?.optimisticId ? data.expense : e)),
+      );
+
       qc.invalidateQueries({ queryKey: keys.summary });
       qc.invalidateQueries({ queryKey: ['activity'] });
       qc.invalidateQueries({ queryKey: keys.friends });
       if (input.groupId) {
         qc.invalidateQueries({ queryKey: keys.groupBalances(input.groupId) });
       }
+    },
+
+    onSettled: () => {
+      // Balances are computed server-side; never trust a locally-derived total.
+      qc.invalidateQueries({ queryKey: ['expenses'] });
+    },
+  });
+}
+
+/**
+ * A stand-in expense for the optimistic window.
+ *
+ * The split amounts here are a PREVIEW only — the server owns allocation, and
+ * onSuccess replaces this object wholesale. It exists so the row appears
+ * instantly, not so the client can do money maths.
+ */
+function buildOptimisticExpense(input: CreateExpenseInput): Expense {
+  const amountMinor = Math.round(Number(input.amount) * 100) || 0;
+  const count = input.participants.length || 1;
+  const base = Math.floor(amountMinor / count);
+  let leftover = amountMinor - base * count;
+
+  return {
+    id: `optimistic-${Date.now()}`,
+    groupId: input.groupId,
+    description: input.description,
+    amountMinor,
+    currency: input.currency,
+    category: input.category,
+    date: new Date().toISOString(),
+    notes: null,
+    receiptUrl: null,
+    splitType: input.splitType,
+    createdById: input.payers[0]?.userId ?? '',
+    payers: input.payers.map((p) => ({
+      userId: p.userId,
+      amountMinor: Math.round(Number(p.amount) * 100) || 0,
+    })),
+    splits: input.participants.map((p) => {
+      const extra = leftover > 0 ? 1 : 0;
+      leftover -= extra;
+      return { userId: p.userId, owedAmountMinor: base + extra, shareValue: p.value ?? null };
+    }),
+  };
+}
+
+export function useUpdateExpense() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...input }: CreateExpenseInput & { id: string }) =>
+      request<{ expense: Expense }>(`/expenses/${id}`, { method: 'PUT', body: input }),
+
+    onMutate: async (input) => {
+      await qc.cancelQueries({ queryKey: ['expenses'] });
+      const previous = qc.getQueriesData<Expense[]>({ queryKey: ['expenses'] });
+
+      qc.setQueriesData<Expense[]>({ queryKey: ['expenses'] }, (old) =>
+        old?.map((e) =>
+          e.id === input.id
+            ? { ...e, description: input.description, category: input.category }
+            : e,
+        ),
+      );
+
+      return { previous };
+    },
+
+    onError: (_err, _input, context) => {
+      context?.previous?.forEach(([key, data]) => qc.setQueryData(key, data));
+    },
+
+    onSettled: (_data, _err, input) => {
+      qc.invalidateQueries({ queryKey: ['expenses'] });
+      qc.invalidateQueries({ queryKey: ['balances'] });
+      qc.invalidateQueries({ queryKey: ['activity'] });
+      if (input.groupId) qc.invalidateQueries({ queryKey: keys.groupBalances(input.groupId) });
     },
   });
 }
@@ -111,7 +221,25 @@ export function useDeleteExpense() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => request<void>(`/expenses/${id}`, { method: 'DELETE' }),
-    onSuccess: () => {
+
+    // Optimistic removal, so the row disappears on tap rather than after a
+    // round trip — with the snapshot kept to restore it if the delete fails.
+    onMutate: async (id) => {
+      await qc.cancelQueries({ queryKey: ['expenses'] });
+      const previous = qc.getQueriesData<Expense[]>({ queryKey: ['expenses'] });
+
+      qc.setQueriesData<Expense[]>({ queryKey: ['expenses'] }, (old) =>
+        old?.filter((e) => e.id !== id),
+      );
+
+      return { previous };
+    },
+
+    onError: (_err, _id, context) => {
+      context?.previous?.forEach(([key, data]) => qc.setQueryData(key, data));
+    },
+
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ['expenses'] });
       qc.invalidateQueries({ queryKey: ['balances'] });
       qc.invalidateQueries({ queryKey: ['activity'] });

@@ -375,4 +375,105 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xxl * 2,
     paddingHorizontal: spacing.xl,
   },
+  toast: {
+    position: 'absolute',
+    left: spacing.lg,
+    right: spacing.lg,
+    bottom: spacing.xxl * 2,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.md,
+    elevation: 8,
+  },
+  offlineBanner: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    borderBottomWidth: 1,
+    alignItems: 'center',
+  },
 });
+
+// --- Toast --------------------------------------------------------------
+
+/**
+ * Minimal toast host. Optimistic mutations roll the cache back on failure,
+ * which is silent by design — the toast is what tells the user their expense
+ * did not actually save.
+ */
+export type ToastTone = 'info' | 'error' | 'success';
+
+interface ToastState {
+  message: string;
+  tone: ToastTone;
+  key: number;
+}
+
+const ToastContext = createContext<(message: string, tone?: ToastTone) => void>(() => {});
+export const useToast = () => useContext(ToastContext);
+
+export function ToastProvider({ children }: { children: React.ReactNode }) {
+  const c = useTheme();
+  const [toast, setToast] = React.useState<ToastState | null>(null);
+  const slide = useRef(new Animated.Value(0)).current;
+
+  const show = React.useCallback(
+    (message: string, tone: ToastTone = 'info') => {
+      setToast({ message, tone, key: Date.now() });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!toast) return undefined;
+
+    slide.setValue(0);
+    Animated.timing(slide, { toValue: 1, duration: 180, useNativeDriver: true }).start();
+
+    const timer = setTimeout(() => {
+      Animated.timing(slide, { toValue: 0, duration: 180, useNativeDriver: true }).start(
+        () => setToast(null),
+      );
+    }, 3200);
+
+    return () => clearTimeout(timer);
+  }, [toast, slide]);
+
+  const background =
+    toast?.tone === 'error' ? c.negative : toast?.tone === 'success' ? c.positive : c.ink;
+
+  return (
+    <ToastContext.Provider value={show}>
+      {children}
+      {toast ? (
+        <Animated.View
+          pointerEvents="none"
+          accessibilityLiveRegion="polite"
+          style={[
+            styles.toast,
+            {
+              backgroundColor: background,
+              opacity: slide,
+              transform: [{ translateY: slide.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
+            },
+          ]}
+        >
+          <Text style={[typography.body, { color: '#FFFFFF' }]}>{toast.message}</Text>
+        </Animated.View>
+      ) : null}
+    </ToastContext.Provider>
+  );
+}
+
+/** Banner shown while the device is offline or has queued expenses. */
+export function OfflineBanner({ pendingCount }: { pendingCount: number }) {
+  const c = useTheme();
+  if (pendingCount === 0) return null;
+
+  return (
+    <View style={[styles.offlineBanner, { backgroundColor: c.ochreSoft, borderColor: c.rule }]}>
+      <T variant="caption" color={c.inkSoft}>
+        {pendingCount} expense{pendingCount === 1 ? '' : 's'} waiting to sync
+      </T>
+    </View>
+  );
+}

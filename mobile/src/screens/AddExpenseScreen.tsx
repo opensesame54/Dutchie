@@ -5,11 +5,11 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import {
-  T, Field, Button, Card, SectionHeading, useTheme, LedgerRow, Divider,
+  T, Field, Button, Card, SectionHeading, useTheme, LedgerRow, Divider, useToast,
 } from '../components/ui';
 import { spacing, radius, MIN_TOUCH_TARGET } from '../theme';
 import { parseToMinor, formatMinor, formatMoney } from '../lib/money';
-import { useGroup, useCreateExpense } from '../lib/queries';
+import { useGroup, useCreateExpense, useUpdateExpense, useDeleteExpense, useExpense } from '../lib/queries';
 import { useAuth } from '../store/auth';
 import type { RootStackParamList } from '../navigation';
 
@@ -23,12 +23,17 @@ const CATEGORIES = [
 ];
 
 export function AddExpenseScreen({ route, navigation }: Props) {
-  const { groupId, currency } = route.params;
+  const { groupId, currency, expenseId } = route.params;
+  const isEditing = !!expenseId;
   const c = useTheme();
   const insets = useSafeAreaInsets();
+  const toast = useToast();
   const me = useAuth((s) => s.user);
   const group = useGroup(groupId);
+  const existing = useExpense(expenseId);
   const createExpense = useCreateExpense();
+  const updateExpense = useUpdateExpense();
+  const deleteExpense = useDeleteExpense();
 
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState('');
@@ -44,10 +49,40 @@ export function AddExpenseScreen({ route, navigation }: Props) {
 
   // Default to splitting with everyone once the group loads.
   useEffect(() => {
-    if (members.length > 0 && Object.keys(selected).length === 0) {
+    if (!isEditing && members.length > 0 && Object.keys(selected).length === 0) {
       setSelected(Object.fromEntries(members.map((m) => [m.id, true])));
     }
-  }, [members.length]);
+  }, [members.length, isEditing]);
+
+  // Prefill the form from the expense being edited. `shareValue` is the operand
+  // the user originally typed, which is why the server stores it — deriving it
+  // back from owed amounts would lose the distinction between, say, 50% and an
+  // exact half.
+  const [prefilled, setPrefilled] = useState(false);
+  useEffect(() => {
+    const expense = existing.data;
+    if (!expense || prefilled) return;
+
+    setDescription(expense.description);
+    setAmount(formatMinor(expense.amountMinor, expense.currency));
+    setCategory(expense.category);
+    setSplitType(expense.splitType);
+    setPaidById(expense.payers[0]?.userId);
+    setSelected(Object.fromEntries(expense.splits.map((sp) => [sp.userId, true])));
+    setValues(
+      Object.fromEntries(
+        expense.splits.map((sp) => [
+          sp.userId,
+          expense.splitType === 'EXACT'
+            ? formatMinor(sp.owedAmountMinor, expense.currency)
+            : expense.splitType === 'PERCENTAGE'
+              ? String((sp.shareValue ?? 0) / 100)
+              : String(sp.shareValue ?? 0),
+        ]),
+      ),
+    );
+    setPrefilled(true);
+  }, [existing.data, prefilled]);
 
   const participants = members.filter((m) => selected[m.id]);
   const totalMinor = parseToMinor(amount, currency);
@@ -112,8 +147,7 @@ export function AddExpenseScreen({ route, navigation }: Props) {
       );
     }
 
-    try {
-      await createExpense.mutateAsync({
+    const payload = {
         groupId,
         description: description.trim(),
         amount: formatMinor(totalMinor, currency),
@@ -132,10 +166,32 @@ export function AddExpenseScreen({ route, navigation }: Props) {
                   ? Math.round((Number(values[p.id] ?? '0') || 0) * 100)
                   : Number(values[p.id] ?? '0') || 0,
         })),
-      });
-      navigation.goBack();
+    };
+
+    // Navigate immediately: the mutation is optimistic, so keeping the user on
+    // a spinner would throw away the point of it. A failure surfaces as a toast
+    // and the cache rolls back underneath them.
+    try {
+      if (isEditing) {
+        navigation.goBack();
+        await updateExpense.mutateAsync({ id: expenseId!, ...payload });
+      } else {
+        navigation.goBack();
+        await createExpense.mutateAsync(payload);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save the expense');
+      toast(err instanceof Error ? err.message : 'Could not save the expense', 'error');
+    }
+  }
+
+  async function remove() {
+    if (!expenseId) return;
+    navigation.goBack();
+    try {
+      await deleteExpense.mutateAsync(expenseId);
+      toast('Expense deleted', 'success');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Could not delete the expense', 'error');
     }
   }
 
@@ -273,13 +329,19 @@ export function AddExpenseScreen({ route, navigation }: Props) {
         <View style={{ height: spacing.xl }} />
 
         <Button
-          title="Save expense"
+          title={isEditing ? 'Save changes' : 'Save expense'}
           onPress={submit}
-          loading={createExpense.isPending}
+          loading={createExpense.isPending || updateExpense.isPending}
           disabled={!description.trim() || totalMinor === null}
         />
         <View style={{ height: spacing.sm }} />
         <Button title="Cancel" variant="secondary" onPress={() => navigation.goBack()} />
+        {isEditing ? (
+          <>
+            <View style={{ height: spacing.xl }} />
+            <Button title="Delete expense" variant="danger" onPress={remove} />
+          </>
+        ) : null}
       </ScrollView>
     </KeyboardAvoidingView>
   );

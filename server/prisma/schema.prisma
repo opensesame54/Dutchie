@@ -230,6 +230,11 @@ model Expense {
   /// Set on generated instances, pointing back at the template.
   recurringTemplateId String?
 
+  /// Client-generated idempotency key. An offline device retrying a queued
+  /// expense sends the same key, so a flush interrupted mid-request cannot
+  /// create the expense twice.
+  clientRequestId String? @unique
+
   deletedAt      DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt

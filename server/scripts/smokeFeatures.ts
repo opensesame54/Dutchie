@@ -241,6 +241,30 @@ async function main() {
     noRate.body.converted,
   );
 
+  console.log('\n=== OFFLINE IDEMPOTENCY ===');
+  const key = `smoke-${Date.now()}`;
+  const payload = {
+    groupId: flat.id,
+    description: 'Queued while offline',
+    amount: '15.00',
+    currency: 'EUR',
+    splitType: 'EQUAL' as const,
+    clientRequestId: key,
+    payers: [{ userId: ana.user.id, amount: '15.00' }],
+    participants: [{ userId: ana.user.id }, { userId: chloe.user.id }],
+  };
+
+  const first = await api('/expenses', { method: 'POST', token: ana.accessToken, body: payload });
+  check('queued expense is created', first.status === 201, first.body);
+
+  // The exact scenario an interrupted outbox flush produces: same key, resent.
+  const replay = await api('/expenses', { method: 'POST', token: ana.accessToken, body: payload });
+  check('a replayed submission is deduplicated', replay.status === 200 && replay.body.deduplicated === true, replay.body);
+  check('the replay returns the original expense', replay.body.expense?.id === first.body.expense.id);
+
+  const dupes = await prisma.expense.count({ where: { clientRequestId: key } });
+  check('only one expense exists for the key', dupes === 1, dupes);
+
   console.log('\n=== CSV EXPORT ===');
   const csv = await api(`/exports/groups/${flat.id}.csv`, { token: ana.accessToken });
   const text = String(csv.body);

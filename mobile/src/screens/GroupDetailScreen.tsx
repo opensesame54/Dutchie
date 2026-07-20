@@ -132,6 +132,18 @@ export function GroupDetailScreen({ route, navigation }: Props) {
                   amountMinor={Math.abs(delta)}
                   currency={e.currency}
                   tone={delta === 0 ? 'neutral' : delta > 0 ? 'positive' : 'negative'}
+                  // An optimistic row has no server id yet, so editing it would
+                  // PUT to a nonexistent expense.
+                  onPress={
+                    e.id.startsWith('optimistic-')
+                      ? undefined
+                      : () =>
+                          navigation.navigate('AddExpense', {
+                            groupId,
+                            currency: e.currency,
+                            expenseId: e.id,
+                          })
+                  }
                 />
               );
             })

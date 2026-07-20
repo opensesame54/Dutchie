@@ -11,17 +11,20 @@ import { GroupDetailScreen } from './screens/GroupDetailScreen';
 import { FriendsScreen } from './screens/FriendsScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { AddExpenseScreen } from './screens/AddExpenseScreen';
+import { NotificationsScreen } from './screens/NotificationsScreen';
 
 export type RootStackParamList = {
   Tabs: undefined;
   GroupDetail: { groupId: string; name: string };
-  AddExpense: { groupId: string; currency: string };
+  // `expenseId` switches the screen into edit mode; absent means create.
+  AddExpense: { groupId: string; currency: string; expenseId?: string };
 };
 
 export type TabParamList = {
   Home: undefined;
   Groups: undefined;
   Friends: undefined;
+  Alerts: undefined;
   Settings: undefined;
 };
 
@@ -36,6 +39,7 @@ const TAB_ICONS: Record<keyof TabParamList, string> = {
   Home: '🧾',
   Groups: '👥',
   Friends: '🤝',
+  Alerts: '🔔',
   Settings: '⚙️',
 };
 
@@ -68,6 +72,7 @@ function Tabs() {
       <Tab.Screen name="Home" component={DashboardScreen} />
       <Tab.Screen name="Groups" component={GroupsScreen} />
       <Tab.Screen name="Friends" component={FriendsScreen} />
+      <Tab.Screen name="Alerts" component={NotificationsScreen} />
       <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
   );
@@ -113,7 +118,10 @@ export function RootNavigator() {
         <Stack.Screen
           name="AddExpense"
           component={AddExpenseScreen}
-          options={{ title: 'Add expense', presentation: 'modal' }}
+          options={({ route }) => ({
+            title: route.params.expenseId ? 'Edit expense' : 'Add expense',
+            presentation: 'modal',
+          })}
         />
       </Stack.Navigator>
     </NavigationContainer>
