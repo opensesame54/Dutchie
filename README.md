@@ -23,8 +23,14 @@ Implemented and verified:
 | Balances, settle up, debt simplification | Done, unit tested |
 | Friends + direct expenses | Done |
 | Activity feed | Done |
-| Mobile: auth, dashboard, groups, group detail, add expense, settle up, friends, settings | Done |
-| Push notifications, multi-currency conversion, offline sync, receipts, recurring generation, charts, CSV export | **Not started** |
+| Mobile: auth, dashboard, groups, group detail, add/edit expense, settle up, friends, settings, notifications | Done |
+| Recurring expense generation (templates + scheduled job) | Done, unit + e2e tested |
+| Multi-currency display conversion | Done, unit + e2e tested |
+| Notifications (in-app feed, Expo push, preferences) | Done, e2e tested |
+| Offline cache + outbox with server-side idempotency | Done, idempotency e2e tested |
+| Optimistic UI with rollback | Done |
+| CSV export | Done, e2e tested |
+| Receipt photos, charts, group budgets, PDF export, friend-request UI | **Not started** |
 
 See "What is not built yet" at the bottom for detail.
 
@@ -92,8 +98,9 @@ direct expense, so balances are non-trivial on first launch.
 
 ```bash
 cd server
-npm test          # 82 unit tests over the money/balance/simplification logic
-npm run smoke     # 28 end-to-end checks against a running API + seeded DB
+npm test               # 130 unit tests: money, balances, simplification, recurrence, FX
+npm run smoke          # 28 end-to-end checks against a running API + seeded DB
+npm run smoke:features # 35 more: recurring, notifications, FX, idempotency, export
 ```
 
 The unit tests cover the parts that must not be wrong: allocation, split types,
@@ -130,6 +137,22 @@ being provably minimal matters less than either.
 those two people actually shared. Simplification is a separate, opt-in view, so
 the app never tells you to pay someone you have never met without saying why.
 
+## Scheduled jobs
+
+Two jobs need a scheduler (cron, or Railway/Render's cron feature). Both are
+idempotent, so over-running them is harmless — which matters because platform
+schedulers retry and occasionally double-fire.
+
+```bash
+npm run job:rates       # refresh today's FX rates (daily, early morning UTC)
+npm run job:recurring   # materialise due recurring expenses (daily)
+npm run job:all         # both, rates first
+```
+
+`job:recurring` catches up every occurrence missed while it was not running,
+so a server down for a week still produces exactly one rent, not zero and not
+seven.
+
 ## API
 
 All routes are under `/api`, all except auth require `Authorization: Bearer <accessToken>`.
@@ -160,7 +183,25 @@ GET    /friends/requests                POST   /friends/requests
 POST   /friends/requests/:id/respond
 
 GET    /activity  (?groupId|limit|cursor)
+
+GET    /expenses/recurring/templates    (?groupId)
+
+GET    /notifications  (?unreadOnly|limit|cursor)
+POST   /notifications/read
+POST   /notifications/devices           DELETE /notifications/devices/:token
+PATCH  /notifications/preferences
+
+GET    /exports/groups/:groupId.csv
 ```
+
+`GET /balances/summary` accepts `?displayCurrency=XXX` and returns a
+`converted` block alongside the per-currency breakdown. Any currency without
+an available rate is listed in `converted.unconvertible` rather than being
+silently omitted from the total.
+
+`POST /expenses` accepts an optional `clientRequestId`; resending the same key
+returns the original expense with `deduplicated: true` instead of creating a
+second one. This is what makes the mobile outbox safe to retry.
 
 Authorization is centralised in `server/src/access.ts` — membership is checked
 in one place rather than re-implemented per handler. Non-members get 404 rather
@@ -186,39 +227,41 @@ ID.
 
 Deliberately deferred, roughly in the order they should be picked up:
 
-1. **Push notifications** — Expo Notifications + FCM. No `expo-notifications`
-   wiring or device-token storage exists yet.
-2. **Multi-currency display conversion** — expenses already carry their own
-   currency and balances are correctly partitioned per currency (they are never
-   summed across currencies), but there is no exchange-rate fetch, so a user
-   with EUR and USD balances sees them separately rather than converted to one
-   display currency.
-3. **Offline caching and sync** — TanStack Query is in place but not persisted;
-   there is no AsyncStorage/SQLite cache and no outbox for queued expenses.
-   Currently a cold start with no connection shows empty states.
-4. **Receipt photos** — `receiptUrl` exists on the model and API, but there is
-   no image picker or S3 upload path.
-5. **Recurring expense generation** — expenses store `isRecurring` and an RRULE
-   string, and the seed uses them, but nothing generates the next occurrence.
-   Needs a scheduled job.
-6. **Optimistic UI** — mutations currently invalidate and refetch. The brief
-   asked for optimistic updates with rollback; that is a follow-up on top of the
-   existing mutation hooks.
-7. **Editing expenses from the app** — the API supports `PUT /expenses/:id`
-   fully; the mobile app only creates and lists.
-8. **Charts, CSV/PDF export, group budgets, friend-request UI.**
+1. **Receipt photos** — `receiptUrl` exists on the model and API, but there is
+   no image picker and no S3 upload path. Needs storage credentials to build
+   against, so it was left rather than stubbed.
+2. **Charts** — spending by category, over time, per member. `react-native-gifted-charts`
+   or Victory Native; Recharts does not work on native.
+3. **PDF export** — CSV is done; PDF needs a rendering dependency.
+4. **Group budgets with alerts.**
+5. **Friend-request UI** — the API is complete (`/friends/requests`), but the
+   mobile Friends screen only lists existing friends and balances.
+6. **Weekly digest email** — the `weeklyDigest` preference is stored and
+   respected by the model, but no transactional email is wired up, so nothing
+   sends it.
+7. **Push token lifecycle on logout** — `unregisterPush()` exists but is not
+   yet called from the logout path.
 
 ## Known gaps and caveats
 
 - **Nothing has been run on a real Android device or emulator.** The app
-  typechecks and the production Android bundle exports cleanly (1207 modules),
-  but no screen has been rendered. Keyboard behaviour, back-gesture handling,
+  typechecks and the production Android bundle exports cleanly (1299 modules),
+  but no screen has been rendered. An attempt to run the bundled Android
+  emulator on this machine failed: the guest boots, then `qemu-system-x86_64`
+  segfaults reproducibly (confirmed via coredumpctl). Not KVM (verified
+  `KVM_CREATE_VM` succeeds) and not sandboxing. Keyboard behaviour, back-gesture handling,
   notification permissions, and safe-area insets all need a real device pass
   before this milestone can honestly be called done.
 - The `mobile/.env` API URL defaults to the Android emulator host. On a
   physical device it must be set to your machine's LAN IP.
 - Password reset tokens are logged to the server console in development; no
   transactional email is wired up.
+- Push notifications cannot work in Expo Go on Android (unavailable since SDK
+  53) and need an EAS `projectId`; `registerForPush()` reports both cases as a
+  reason rather than failing.
+- FX rates come from exchangerate.host (no API key). If it is unreachable the
+  most recent cached rates are used, and currencies with no rate at all are
+  reported as unconvertible rather than dropped.
 - `Intl` support under Hermes has not been verified on-device. `formatMinor`
   uses `toLocaleString` for thousands separators, which is the one place that
   would show up if the runtime lacks full ICU.
